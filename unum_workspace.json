@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "languages": [
+    "cpp",
+    "javascript",
+    "python"
+  ],
+  "databases": [
+    "mysql",
+    "postgresql"
+  ],
+  "sdks": [
+    "android34"
+  ],
+  "active_database": "mysql"
+}

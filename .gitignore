@@ -1,0 +1,22 @@
+# Node / Frontend
+node_modules/
+dist/
+build/
+app-frontend/dist/
+app-frontend/release/
+
+# Python / Backend
+.venv/
+venv/
+__pycache__/
+*.pyc
+core-backend/.venv/
+
+# Runtimes local y BD
+*.sqlite3
+*.db
+runtimes/
+
+# Sistema y VS Code
+.DS_Store
+.vscode/

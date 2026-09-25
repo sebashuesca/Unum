@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: unum-core
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: uvicorn[standard]<1,>=0.30
+Requires-Dist: sqlalchemy[asyncio]<3,>=2.0
+Requires-Dist: aiosqlite<1,>=0.20
+Requires-Dist: pandas<4,>=2.2
+Requires-Dist: openpyxl<4,>=3.1
+Requires-Dist: jsonschema<5,>=4.23
+Requires-Dist: GitPython<4,>=3.1
+Requires-Dist: httpx<1,>=0.27
+Requires-Dist: cryptography<47,>=43
+Requires-Dist: zstandard<1,>=0.23
+Requires-Dist: asyncpg<1,>=0.30
+Requires-Dist: asyncmy<1,>=0.2
+Requires-Dist: pymongo<5,>=4.11
+Requires-Dist: redis<7,>=5.2
+Requires-Dist: cassandra-driver<4,>=3.29
+Provides-Extra: test
+Requires-Dist: pytest<10,>=8; extra == "test"
+Requires-Dist: pytest-asyncio<2,>=0.24; extra == "test"
+Requires-Dist: httpx<1,>=0.27; extra == "test"
