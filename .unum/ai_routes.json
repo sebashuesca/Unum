@@ -1,0 +1,14 @@
+{
+  "code": {
+    "provider": "local",
+    "model": "deepseek-coder:1.3b"
+  },
+  "sql": {
+    "provider": "local",
+    "model": "nous-hermes2:10.7b"
+  },
+  "debug": {
+    "provider": "local",
+    "model": "qwen2.5-coder:3b"
+  }
+}
