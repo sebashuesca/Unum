@@ -3,9 +3,32 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import subprocess
 import sys
 import venv
 from pathlib import Path
+
+
+def process_group_options() -> dict:
+    return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+
+
+async def stop_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    if os.name == "nt":
+        process.terminate()
+    else:
+        os.killpg(process.pid, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(process.wait(), 2)
+    except asyncio.TimeoutError:
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
 
 
 class EnvironmentManager:
@@ -27,7 +50,14 @@ class EnvironmentManager:
         if not name.isidentifier():
             raise ValueError("Invalid environment name")
         path = self.home / "venvs" / name
-        await asyncio.to_thread(venv.EnvBuilder(with_pip=True).create, str(path))
+        if getattr(sys, "frozen", False):
+            executable = self.runtime("python", "python.exe" if os.name == "nt" else "bin/python")
+            process = await asyncio.create_subprocess_exec(str(executable), "-m", "venv", str(path),
+                                                            cwd=self.workspace, env=self.child_env())
+            if await process.wait():
+                raise RuntimeError("Workspace Python runtime failed to create a virtual environment")
+        else:
+            await asyncio.to_thread(venv.EnvBuilder(with_pip=True).create, str(path))
         return path
 
     def child_env(self, *, venv_path: Path | None = None, additions: dict[str, str] | None = None) -> dict[str, str]:
@@ -53,6 +83,7 @@ class EnvironmentManager:
             env["ANDROID_HOME"] = str(android_home)
             env["ANDROID_SDK_ROOT"] = str(android_home)
             env["ANDROID_USER_HOME"] = str(self.home / "android-user")
+            env["ANDROID_AVD_HOME"] = str(self.home / "android-user" / "avd")
         if gradle_home.is_dir():
             env["GRADLE_USER_HOME"] = str(self.home / "gradle-cache")
         env["MAVEN_OPTS"] = f"{env.get('MAVEN_OPTS', '')} -Dmaven.repo.local={self.home / 'maven-cache'}".strip()
@@ -64,6 +95,7 @@ class EnvironmentManager:
     def local_command(self, tool: str) -> Path:
         paths = {
             "adb": ("android", "platform-tools/adb"),
+            "emulator": ("android", "emulator/emulator"),
             "gradle": ("gradle", "bin/gradle"),
             "maven": ("maven", "bin/mvn"),
             "java": ("java", "bin/java"),
@@ -72,7 +104,8 @@ class EnvironmentManager:
         if tool not in paths:
             raise ValueError("Unsupported local tool")
         name, relative = paths[tool]
-        suffix = ".exe" if sys.platform == "win32" and tool in {"adb", "java", "node"} else ""
+        suffix = ({"adb": ".exe", "emulator": ".exe", "java": ".exe", "node": ".exe",
+                   "gradle": ".bat", "maven": ".cmd"}.get(tool, "") if os.name == "nt" else "")
         return self.runtime(name, relative + suffix)
 
     def project_path(self, raw: str) -> Path:
@@ -83,7 +116,11 @@ class EnvironmentManager:
 
     def runtime_status(self) -> dict[str, bool]:
         checks = {"java": "bin/java", "android": "platform-tools/adb", "gradle": "bin/gradle", "maven": "bin/mvn", "node": "bin/node", "cpp": "bin/clang++"}
+        if os.name == "nt":
+            checks = {"java": "bin/java.exe", "android": "platform-tools/adb.exe", "gradle": "bin/gradle.bat",
+                      "maven": "bin/mvn.cmd", "node": "bin/node.exe", "cpp": "bin/clang++.exe"}
         status = {name: (self.home / "runtimes" / name / executable).is_file() for name, executable in checks.items()}
-        status["java"] = status["java"] and (self.home / "runtimes" / "java" / "bin" / "javac").is_file()
+        status["emulator"] = (self.home / "runtimes" / "android" / "emulator" / ("emulator.exe" if os.name == "nt" else "emulator")).is_file()
+        status["java"] = status["java"] and (self.home / "runtimes" / "java" / "bin" / ("javac.exe" if os.name == "nt" else "javac")).is_file()
         status["lsp"] = (self.home / "runtimes" / "lsp").is_dir()
         return status

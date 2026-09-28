@@ -13,6 +13,7 @@ src/unum_core/lsp_manager.py
 src/unum_core/main.py
 src/unum_core/migration.py
 src/unum_core/projects.py
+src/unum_core/relational.py
 src/unum_core/runner.py
 src/unum_core/terminal.py
 src/unum_core/uploads.py

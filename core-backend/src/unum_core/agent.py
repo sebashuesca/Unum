@@ -1,10 +1,12 @@
-"""Read-only workspace context and optional local OpenAI-compatible streaming model."""
+"""Workspace context, bounded file tools and local runtime commands for the assistant."""
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 import re
+import shlex
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -68,6 +70,62 @@ class Agent:
         if not path.is_file() or path.stat().st_size > 100_000:
             raise ValueError("File unavailable or too large")
         return path.read_text(encoding="utf-8")
+
+    def write_file(self, raw: str, content: str) -> str:
+        if any(part.startswith(".") or part in IGNORED_DIRS for part in Path(raw).parts):
+            raise ValueError("File is outside editable project sources")
+        path = self.env.project_path(raw)
+        if not path.parent.is_dir() or path.is_symlink() or len(content.encode()) > 2_000_000:
+            raise ValueError("File unavailable or too large")
+        descriptor, temporary = tempfile.mkstemp(prefix=".unum-edit-", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(content)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return f"Saved {raw}"
+
+    def apply_patch(self, raw: str, old: str, new: str) -> str:
+        content = self.read_file(raw)
+        if not old or content.count(old) != 1:
+            raise ValueError("Patch context must match exactly once")
+        return self.write_file(raw, content.replace(old, new, 1))
+
+    async def run_command(self, command: str) -> str:
+        arguments = shlex.split(command)
+        if not arguments or len(arguments) > 30:
+            raise ValueError("Invalid command")
+        allowed = {
+            "python": self.env.home / "venvs" / "workspace" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
+            "java": self.env.home / "runtimes" / "java" / "bin" / ("java.exe" if os.name == "nt" else "java"),
+            "javac": self.env.home / "runtimes" / "java" / "bin" / ("javac.exe" if os.name == "nt" else "javac"),
+            "gradle": self.env.home / "runtimes" / "gradle" / "bin" / ("gradle.bat" if os.name == "nt" else "gradle"),
+            "maven": self.env.home / "runtimes" / "maven" / "bin" / ("mvn.cmd" if os.name == "nt" else "mvn"),
+            "node": self.env.home / "runtimes" / "node" / "bin" / ("node.exe" if os.name == "nt" else "node"),
+        }
+        executable = allowed.get(arguments[0])
+        if executable is None or not executable.is_file():
+            raise ValueError("Command must use an installed workspace runtime")
+        process = await asyncio.create_subprocess_exec(str(executable), *arguments[1:], cwd=self.env.workspace,
+            env=self.env.child_env(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 30)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise ValueError("Command timed out") from None
+        return f"Exit {process.returncode}\n{stdout.decode('utf-8', 'replace')[:12000]}\n{stderr.decode('utf-8', 'replace')[:12000]}"
+
+    async def tool_async(self, name: str, arguments: dict) -> str:
+        if name == "write_file":
+            return await asyncio.to_thread(self.write_file, arguments["path"], arguments["content"])
+        if name == "apply_patch":
+            return await asyncio.to_thread(self.apply_patch, arguments["path"], arguments["old"], arguments["new"])
+        if name == "run_terminal_command":
+            return await self.run_command(arguments["command"])
+        return await asyncio.to_thread(self.tool, name, arguments)
 
     def tool(self, name: str, arguments: dict) -> str:
         if name == "read_file":

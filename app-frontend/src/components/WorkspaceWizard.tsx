@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ArrowLeft, ArrowRight, Check, Code2, Database, HardDrive, Smartphone } from 'lucide-react'
 import type { WorkspaceConfiguration } from '../types'
+import { BrandMark } from './BrandMark'
 
 const languageOptions = [
   ['java', 'Java', 'JVM'], ['kotlin', 'Kotlin', 'JVM / Android'], ['sql', 'SQL', 'Data'],
@@ -43,7 +44,7 @@ export function WorkspaceWizard({ initial, onSave }: { initial?: WorkspaceConfig
   }
 
   return <div className="wizard-backdrop"><div className="wizard-modal" role="dialog" aria-modal="true" aria-label="Workspace setup">
-    <div className="wizard-aside"><div className="wizard-brand">U</div><h2>Make it yours.</h2><p>Configure your workspace in three quick steps. Everything stays local.</p><div className="wizard-steps">{['Languages', 'Databases', 'SDKs & Toolchains'].map((title, index) => <button className={index === step ? 'current' : index < step ? 'complete' : ''} key={title} onClick={() => setStep(index)}><span>{index < step ? <Check size={14} /> : index + 1}</span>{title}</button>)}</div><small>UNUM IDE · WORKSPACE SETUP</small></div>
+    <div className="wizard-aside"><div className="wizard-brand"><BrandMark decorative /></div><h2>Make it yours.</h2><p>Configure your workspace in three quick steps. Everything stays local.</p><div className="wizard-steps">{['Languages', 'Databases', 'SDKs & Toolchains'].map((title, index) => <button className={index === step ? 'current' : index < step ? 'complete' : ''} key={title} onClick={() => setStep(index)}><span>{index < step ? <Check size={14} /> : index + 1}</span>{title}</button>)}</div><small>UNUM IDE · WORKSPACE SETUP</small></div>
     <div className="wizard-content"><div className="wizard-counter">STEP {step + 1} OF 3</div><div className="wizard-icon">{step === 0 ? <Code2 size={24} /> : step === 1 ? <Database size={24} /> : <Smartphone size={24} />}</div><h2>{titles[step]}</h2><p>{descriptions[step]}</p><div className="wizard-options">{options.map(([id, label, detail]) => <button key={id} className={groups[step].includes(id) ? 'chosen' : ''} onClick={() => toggle(id)}><span className="option-icon">{step === 0 ? <Code2 size={18} /> : step === 1 ? <Database size={18} /> : <HardDrive size={18} />}</span><span className="option-text"><strong>{label}</strong><small>{detail}</small></span><span className="option-check">{groups[step].includes(id) && <Check size={13} />}</span></button>)}</div>{error && <div className="wizard-error">{error}</div>}<div className="wizard-navigation"><button className="ghost-button" disabled={step === 0} onClick={() => setStep(step - 1)}><ArrowLeft size={15} /> Back</button><button className="primary-button" disabled={saving || (step < 2 && groups[step].length === 0)} onClick={() => void next()}>{step === 2 ? saving ? 'Saving…' : 'Create workspace' : 'Continue'} <ArrowRight size={15} /></button></div></div>
   </div></div>
 }

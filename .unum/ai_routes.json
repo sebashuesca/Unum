@@ -1,14 +1,18 @@
 {
   "code": {
     "provider": "local",
-    "model": "deepseek-coder:1.3b"
+    "model": "codellama:7b"
   },
   "sql": {
     "provider": "local",
-    "model": "nous-hermes2:10.7b"
+    "model": "codellama:7b"
   },
   "debug": {
     "provider": "local",
-    "model": "qwen2.5-coder:3b"
+    "model": "codellama:7b"
+  },
+  "chat_consultant": {
+    "provider": "local",
+    "model": "codellama:7b"
   }
 }

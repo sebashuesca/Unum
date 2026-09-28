@@ -31,20 +31,19 @@ class Terminal:
     async def start(self, cols: int = 80, rows: int = 24) -> None:
         if self.process and self.process.returncode is None:
             return
-        
+
         if IS_WINDOWS:
-            # Respaldo seguro para Windows usando una shell estándar de Windows (cmd o powershell)
+            # Windows uses asynchronous pipes for its built-in command shell.
             self.process = await asyncio.create_subprocess_exec(
-                "cmd.exe",
+                os.environ.get("COMSPEC", "cmd.exe"),
                 cwd=self.env.workspace,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self.env.child_env(additions={"TERM": "xterm-256color"}),
             )
-            self.master = None # En Windows se maneja a través de pipes estándar
+            self.master = None
         else:
-            # Comportamiento original para Linux / macOS con PTY
             master, slave = pty.openpty()
             self.master = master
             self.resize(cols, rows)
@@ -61,40 +60,41 @@ class Terminal:
 
     async def _read(self) -> None:
         try:
+            if IS_WINDOWS:
+                assert self.process and self.process.stdout and self.process.stderr
+                await asyncio.gather(self._read_pipe(self.process.stdout), self._read_pipe(self.process.stderr))
+                return
             while True:
-                if IS_WINDOWS:
-                    if not self.process or not self.process.stdout:
-                        break
-                    data = await self.process.stdout.read(8192)
-                    if not data:
-                        break
-                else:
-                    assert self.master is not None
-                    try:
-                        data = await asyncio.to_thread(os.read, self.master, 8192)
-                    except OSError:
-                        break
-                    if not data:
-                        break
-
-                decoded = data.decode("utf-8", "replace")
-                await self.emit({"event": "terminal.output", "data": decoded})
-                self.error_buffer = (self.error_buffer + decoded)[-4000:]
-                
-                if any(marker in self.error_buffer for marker in ("ModuleNotFoundError:", "SyntaxError:", "Traceback (most recent call last):")):
-                    suggestions = diagnose(self.error_buffer)
-                    fingerprint = "|".join(suggestions)
-                    if fingerprint != self.last_diagnosis:
-                        self.last_diagnosis = fingerprint
-                        await self.emit({"event": "agent.suggestion", "suggestions": suggestions})
+                assert self.master is not None
+                try:
+                    data = await asyncio.to_thread(os.read, self.master, 8192)
+                except OSError:
+                    break
+                if not data:
+                    break
+                await self._send_output(data)
         finally:
             await self.emit({"event": "terminal.exit"})
+
+    async def _read_pipe(self, pipe: asyncio.StreamReader) -> None:
+        while data := await pipe.read(8192):
+            await self._send_output(data)
+
+    async def _send_output(self, data: bytes) -> None:
+        decoded = data.decode("utf-8", "replace")
+        await self.emit({"event": "terminal.output", "data": decoded})
+        self.error_buffer = (self.error_buffer + decoded)[-4000:]
+        if any(marker in self.error_buffer for marker in ("ModuleNotFoundError:", "SyntaxError:", "Traceback (most recent call last):")):
+            suggestions = diagnose(self.error_buffer)
+            fingerprint = "|".join(suggestions)
+            if fingerprint != self.last_diagnosis:
+                self.last_diagnosis = fingerprint
+                await self.emit({"event": "agent.suggestion", "suggestions": suggestions})
 
     def write(self, data: str) -> None:
         if IS_WINDOWS:
             if self.process and self.process.stdin:
-                self.process.stdin.write(data.encode("utf-8"))
-                # No se usa await aquí porque es una interfaz sincrónica solicitada por el contrato
+                self.process.stdin.write(data.replace("\r", "\r\n").encode("utf-8"))
         else:
             if self.master is None:
                 raise ValueError("Terminal is not running")
@@ -116,11 +116,11 @@ class Terminal:
                 except asyncio.TimeoutError:
                     os.killpg(self.process.pid, signal.SIGKILL)
                     await self.process.wait()
-                    
+
         if self.reader:
             self.reader.cancel()
             await asyncio.gather(self.reader, return_exceptions=True)
-            
+
         if not IS_WINDOWS and self.master is not None:
             os.close(self.master)
             self.master = None

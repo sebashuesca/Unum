@@ -3,7 +3,15 @@ export type EventPacket = { event: string; msg_id?: string; [key: string]: unkno
 
 declare global {
   interface Window {
-    unum?: { token: () => Promise<string>; window: (action: 'minimize' | 'maximize' | 'close') => Promise<void> }
+    unum?: {
+      connection: () => Promise<{ token: string; port: number }>
+      window: (action: 'minimize' | 'maximize' | 'close') => Promise<void>
+      googleProfile: () => Promise<{ name: string; email: string; picture: string } | null>
+      googleLogin: (clientId: string) => Promise<{ name: string; email: string; picture: string }>
+      googleLogout: () => Promise<boolean>
+      revealArtifact: (path: string) => Promise<void>
+      exportArtifact: (path: string) => Promise<boolean>
+    }
   }
 }
 
@@ -24,9 +32,12 @@ class IpcClient {
   }
 
   private async open() {
-    const token = await window.unum?.token()
+    const connection = await window.unum?.connection()
     if (this.socket && (this.socket.readyState === WebSocket.CONNECTING || this.socket.readyState === WebSocket.OPEN)) return
-    this.socket = new WebSocket(`ws://127.0.0.1:8000/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`)
+    if (!connection && window.location.protocol === 'file:') throw new Error('Electron connection bridge unavailable')
+    const port = connection?.port ?? 8000
+    const token = connection?.token
+    this.socket = new WebSocket(`ws://127.0.0.1:${port}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`)
     this.socket.onopen = () => {
       this.connected = true
       this.statusListeners.forEach((listener) => listener(true))

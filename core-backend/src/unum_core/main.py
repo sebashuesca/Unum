@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -43,8 +44,10 @@ runner = SourceRunner(env)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    await ai.startup()
     yield
-    await ai.stop_engine()
+    await ai.shutdown()
+    await android.close()
     await db.close()
 
 
@@ -58,12 +61,16 @@ async def health() -> dict:
 
 @app.websocket("/ws")
 async def websocket(websocket: WebSocket) -> None:
-    origin = websocket.headers.get("origin", "")
-    if origin and not (origin == "null" or origin.startswith(("http://127.0.0.1:", "http://localhost:"))):
+    token = os.environ.get("UNUM_IPC_TOKEN")
+    supplied_token = websocket.query_params.get("token", "")
+    if token and not secrets.compare_digest(supplied_token, token):
         await websocket.close(code=1008)
         return
-    token = os.environ.get("UNUM_IPC_TOKEN")
-    if token and websocket.query_params.get("token") != token:
+    origin = websocket.headers.get("origin", "")
+    allowed_origin = (not origin or origin == "null" or
+                      origin.startswith(("http://127.0.0.1:", "http://localhost:")) or
+                      (origin.startswith("file://") and bool(token)))
+    if not allowed_origin:
         await websocket.close(code=1008)
         return
     await websocket.accept()
@@ -206,6 +213,17 @@ async def websocket(websocket: WebSocket) -> None:
             return result
         if action == "android.devices":
             return {"devices": await android.devices()}
+        if action == "android.status":
+            return android.status()
+        if action == "android.avds":
+            return {"avds": await android.avds()}
+        if action == "android.emulator":
+            return await android.start_emulator(payload["avd"])
+        if action == "android.screen":
+            return await android.screen(payload["serial"])
+        if action == "android.tap":
+            await android.tap(payload["serial"], payload["x"], payload["y"])
+            return {"sent": True}
         if action == "android.monitor":
             if monitor_task is None:
                 monitor_task = asyncio.create_task(android.monitor(emit, monitor_stop))
@@ -220,7 +238,8 @@ async def websocket(websocket: WebSocket) -> None:
                         await emit({**message, "msg_id": msg_id})
                     code = await android.build(payload["tool"], payload.get("args", []), build_emit, payload.get("project", "."))
                     await emit({"event": "build.exit", "msg_id": msg_id, "code": code,
-                                "suggestions": diagnose("".join(stderr)) if code else []})
+                                "suggestions": diagnose("".join(stderr)) if code else [],
+                                "artifacts": android.apk_artifacts(payload.get("project", ".")) if payload["tool"] == "apk" and code == 0 else []})
                 except Exception as exc:
                     await emit({"event": "build.exit", "msg_id": msg_id, "code": -1, "suggestions": [str(exc)]})
             await run_job(build_job())
@@ -236,6 +255,8 @@ async def websocket(websocket: WebSocket) -> None:
             return {"context": agent.context()}
         if action == "agent.read":
             return {"content": agent.read_file(payload["path"])}
+        if action == "agent.tool":
+            return {"result": await agent.tool_async(payload["name"], payload.get("arguments", {}))}
         if action == "agent.diagnose":
             return {"suggestions": diagnose(payload["stderr"])}
         if action == "agent.chat":
@@ -249,13 +270,23 @@ async def websocket(websocket: WebSocket) -> None:
             await run_job(chat_job())
             return {"started": True}
         if action == "AI_STATUS":
-            return {**ai.status(), "installed_models": await ai.installed_models()}
+            return {**await ai.status(), "installed_models": await ai.installed_models()}
         if action == "AI_SAVE_KEYS":
-            return {"providers": await asyncio.to_thread(ai.vault.save, payload["provider"], payload["api_key"], payload["passphrase"])}
+            providers = await asyncio.to_thread(ai.vault.save, payload["provider"], payload["api_key"], payload["passphrase"])
+            async def verify_key_job():
+                try:
+                    result = await ai.test_key(payload["provider"], payload["passphrase"])
+                    await emit({"event": "AI_JOB_DONE", "msg_id": msg_id, "result": result})
+                except Exception as exc:
+                    await emit({"event": "AI_JOB_ERROR", "msg_id": msg_id, "error": f"Credential saved; connectivity test failed: {exc}"})
+            await run_job(verify_key_job())
+            return {"providers": providers, "verification_started": True}
         if action == "AI_TEST_KEY":
             return await ai.test_key(payload["provider"], payload["passphrase"])
         if action == "AI_SET_ROUTES":
             return {"routes": ai.set_routes(payload["routes"])}
+        if action == "AI_AUTO_ROUTES":
+            return {"routes": ai.enable_auto_routes()}
         if action == "AI_START_ENGINE":
             return await ai.start_engine()
         if action == "AI_STOP_ENGINE":
@@ -264,6 +295,7 @@ async def websocket(websocket: WebSocket) -> None:
             async def install_job():
                 try:
                     result = await ai.install_engine(lambda event: emit({**event, "msg_id": msg_id}))
+                    await ai.start_engine()
                     await emit({"event": "AI_JOB_DONE", "msg_id": msg_id, "result": result})
                 except Exception as exc:
                     await emit({"event": "AI_JOB_ERROR", "msg_id": msg_id, "error": str(exc)})
@@ -281,7 +313,7 @@ async def websocket(websocket: WebSocket) -> None:
         if action == "STREAM_AI_RESPONSE":
             async def stream_job():
                 try:
-                    async for chunk in ai.stream_response(payload["question"], payload.get("role", "code"), payload.get("passphrase", ""), payload.get("stderr", "")):
+                    async for chunk in ai.stream_response(payload["question"], payload.get("role", "code"), payload.get("passphrase", ""), payload.get("stderr", ""), lambda event: emit({**event, "msg_id": msg_id}), payload.get("history", []), payload.get("allow_cloud_tools", False), payload.get("allow_consultant_edits", False)):
                         await emit({"event": "AI_RESPONSE_CHUNK", "msg_id": msg_id, "chunk": chunk})
                     await emit({"event": "AI_RESPONSE_DONE", "msg_id": msg_id})
                 except Exception as exc:
@@ -318,7 +350,10 @@ async def websocket(websocket: WebSocket) -> None:
 
 def run() -> None:
     import uvicorn
-    uvicorn.run("unum_core.main:app", host="127.0.0.1", port=8000, reload=False)
+    port = int(os.environ.get("UNUM_BACKEND_PORT", "8000"))
+    if not 1 <= port <= 65535:
+        raise ValueError("Invalid backend port")
+    uvicorn.run(app, host="127.0.0.1", port=port, reload=False, access_log=False)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ import { type OnMount } from '@monaco-editor/react'
 import type * as Monaco from 'monaco-editor'
 import { ipc } from '../services/ipc'
 import { LocalMonacoEditor } from './LocalMonacoEditor'
+import { loadTheme, type UnumTheme } from '../theme'
 
 export type OpenFile = { path: string; uri: string; content: string; dirty: boolean }
 export type SchemaTable = { name: string; columns: { name: string; type: string }[] }
@@ -18,6 +19,7 @@ export function CodeEditor({ file, onChange, schema }: { file: OpenFile; onChang
   const monacoRef = useRef<typeof Monaco | null>(null)
   const completionRegistration = useRef<Monaco.IDisposable | null>(null)
   const schemaRegistration = useRef<Monaco.IDisposable | null>(null)
+  const themeAbort = useRef(new AbortController())
   const schemaRef = useRef(schema)
   const lspActive = useRef(false)
   const completionId = useRef(100)
@@ -28,7 +30,7 @@ export function CodeEditor({ file, onChange, schema }: { file: OpenFile; onChang
   const version = useRef(1)
 
   useEffect(() => { schemaRef.current = schema }, [schema])
-  useEffect(() => () => { completionRegistration.current?.dispose(); schemaRegistration.current?.dispose() }, [])
+  useEffect(() => () => { completionRegistration.current?.dispose(); schemaRegistration.current?.dispose(); themeAbort.current.abort() }, [])
 
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
@@ -43,11 +45,16 @@ export function CodeEditor({ file, onChange, schema }: { file: OpenFile; onChang
         ] },
       })
     }
-    monaco.editor.defineTheme('unum-dark', { base: 'vs-dark', inherit: true, rules: [], colors: {
-      'editor.background': '#0f1724', 'editor.foreground': '#c9d5e5', 'editorLineNumber.foreground': '#455267',
-      'editor.selectionBackground': '#234760', 'editor.lineHighlightBackground': '#141f2e',
-    } })
-    monaco.editor.setTheme('unum-dark')
+    const setEditorTheme = (next: UnumTheme) => {
+      monaco.editor.defineTheme('unum-dark', { base: 'vs-dark', inherit: true, rules: [{ token: 'keyword', foreground: next.accent.slice(1) }], colors: {
+        'editor.background': next.editor, 'editor.foreground': '#c9d5e5', 'editorLineNumber.foreground': '#455267',
+        'editor.selectionBackground': '#234760', 'editor.lineHighlightBackground': '#141f2e',
+      } })
+      monaco.editor.setTheme('unum-dark')
+    }
+    setEditorTheme(loadTheme())
+    const themeListener = (event: Event) => setEditorTheme((event as CustomEvent<UnumTheme>).detail)
+    window.addEventListener('unum-theme-change', themeListener, { signal: themeAbort.current.signal })
     completionRegistration.current?.dispose()
     completionRegistration.current = monaco.languages.registerCompletionItemProvider(lang, {
       triggerCharacters: ['.'],

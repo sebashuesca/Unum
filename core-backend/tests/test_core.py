@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from unum_core.database import Database
 from unum_core.connections import Connection, ConnectionManager
@@ -29,10 +31,24 @@ from unum_core.ai_vault import KeyVault
 from unum_core.uploads import Uploads
 from unum_core.ai_hub import AIHub
 from unum_core.agent import Agent
+from unum_core.android_orchestrator import AndroidOrchestrator
 import unum_core.main as main_module
 
 
 class CoreIntegrationTests(unittest.TestCase):
+    def test_packaged_file_origin_requires_matching_ipc_token(self):
+        with patch.dict(os.environ, {"UNUM_IPC_TOKEN": "packaged-session-token"}):
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws?token=packaged-session-token", headers={"origin": "file://"}) as socket:
+                    socket.send_json({"action": "GET_WORKSPACE", "msg_id": "file-auth", "payload": {}})
+                    self.assertEqual(socket.receive_json()["msg_id"], "file-auth")
+                for url, origin in (("/ws?token=wrong", "file://"),
+                                    ("/ws", "file://"),
+                                    ("/ws?token=packaged-session-token", "https://example.com")):
+                    with self.subTest(url=url, origin=origin), self.assertRaises(WebSocketDisconnect):
+                        with client.websocket_connect(url, headers={"origin": origin}):
+                            pass
+
     def test_websocket_protocol_and_json_schema(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(main_module, "workspace_config", WorkspaceConfig(Path(temporary))):
             with TestClient(app) as client, client.websocket_connect("/ws") as socket:
@@ -49,7 +65,22 @@ class CoreIntegrationTests(unittest.TestCase):
                 socket.send_json({"action": "GENERATE_ER_DIAGRAM", "msg_id": "er-1", "payload": {}})
                 self.assertIn("nodes", socket.receive_json()["payload"])
                 socket.send_json({"action": "AI_STATUS", "msg_id": "ai-1", "payload": {}})
-                self.assertIn("catalog", socket.receive_json()["payload"])
+                ai_status = socket.receive_json()["payload"]
+                self.assertIn("catalog", ai_status)
+                self.assertIn("chat_consultant", ai_status["routes"])
+                async def consultant_response(question, role, *args):
+                    self.assertEqual(question, "Explain this workspace")
+                    self.assertEqual(role, "chat_consultant")
+                    self.assertFalse(args[-1])
+                    yield "Workspace advice"
+                with patch.object(main_module.ai, "stream_response", consultant_response):
+                    socket.send_json({"action": "STREAM_AI_RESPONSE", "msg_id": "consult-1", "payload": {
+                        "question": "Explain this workspace", "role": "chat_consultant",
+                    }})
+                    packets = [socket.receive_json() for _ in range(3)]
+                self.assertTrue(all(packet["msg_id"] == "consult-1" for packet in packets))
+                self.assertIn("AI_RESPONSE_CHUNK", {packet.get("event") for packet in packets})
+                self.assertIn("AI_RESPONSE_DONE", {packet.get("event") for packet in packets})
                 socket.send_json({"action": "DATABASE_CONNECTIONS", "msg_id": "db-list", "payload": {}})
                 self.assertEqual(socket.receive_json()["payload"]["connections"][0]["id"], "local")
 
@@ -262,6 +293,8 @@ class CoreIntegrationTests(unittest.TestCase):
                 hub.process = type("Process", (), {"returncode": None})()
                 requests = []
                 def handler(request):
+                    if request.url.path == "/api/version":
+                        return httpx.Response(200, json={"version": "test"})
                     body = json.loads(request.content)
                     requests.append(body)
                     if len(requests) == 1:
@@ -273,6 +306,197 @@ class CoreIntegrationTests(unittest.TestCase):
                     chunks = [chunk async for chunk in hub.stream_response("Read answer.py", "code")]
                 self.assertEqual(chunks, ["Found 42."])
                 self.assertIn("answer = 42", requests[1]["messages"][-1]["content"])
+        asyncio.run(scenario())
+
+    def test_ai_verification_routes_and_workspace_edits(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                hub = AIHub(EnvironmentManager(root))
+                (root / "sample.py").write_text("value = 1\n")
+                def handler(request):
+                    self.assertEqual(request.url.path, "/api/chat")
+                    body = json.loads(request.content)
+                    self.assertEqual(body["messages"], [{"role": "user", "content": "ping"}])
+                    self.assertEqual(body["options"]["temperature"], 0.0)
+                    return httpx.Response(200, json={"message": {"role": "assistant", "content": "pong"}})
+                original = httpx.AsyncClient
+                with patch("unum_core.ai_hub.httpx.AsyncClient", side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler))):
+                    await hub.verify_local_model(" model:tag ")
+                self.assertEqual(hub.routes()["debug"], {"provider": "local", "model": "model:tag"})
+                await hub.agent.tool_async("apply_patch", {"path": "sample.py", "old": "value = 1", "new": "value = 2"})
+                self.assertEqual((root / "sample.py").read_text(), "value = 2\n")
+                with self.assertRaises(ValueError):
+                    await hub.agent.tool_async("write_file", {"path": ".unum/ai_keys.enc", "content": "leak"})
+        asyncio.run(scenario())
+
+    def test_code_consultant_migrates_routes_and_stays_read_only(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "sample.py").write_text("answer = 1\n")
+                hub = AIHub(EnvironmentManager(root))
+                legacy = {role: route.copy() for role, route in hub.routes().items() if role != "chat_consultant"}
+                hub.routes_path.write_text(json.dumps(legacy))
+                self.assertEqual(hub.routes()["chat_consultant"], legacy["code"])
+                saved = hub.set_routes(legacy)
+                self.assertIn("chat_consultant", saved)
+                self.assertIn("chat_consultant", json.loads(hub.routes_path.read_text()))
+                requests = []
+                def handler(request):
+                    if request.url.path == "/api/version":
+                        return httpx.Response(200, json={"version": "test"})
+                    body = json.loads(request.content)
+                    requests.append(body)
+                    if len(requests) == 1:
+                        call = {"function": {"name": "write_file", "arguments": {"path": "sample.py", "content": "changed"}}}
+                        return httpx.Response(200, text=json.dumps({"message": {"tool_calls": [call]}}) + "\n")
+                    return httpx.Response(200, text='{"message":{"content":"The project contains sample.py."}}\n')
+                original = httpx.AsyncClient
+                with patch("unum_core.ai_hub.httpx.AsyncClient", side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler))):
+                    chunks = [chunk async for chunk in hub.stream_response("Explain the workspace", "chat_consultant")]
+                self.assertEqual(chunks, ["The project contains sample.py."])
+                self.assertEqual((root / "sample.py").read_text(), "answer = 1\n")
+                self.assertIn("senior software architect", requests[0]["messages"][0]["content"])
+                self.assertEqual({item["function"]["name"] for item in requests[0]["tools"]},
+                                 {"read_file", "search_text", "repository_context"})
+                self.assertIn("Tool error", requests[1]["messages"][-1]["content"])
+        asyncio.run(scenario())
+
+    def test_code_consultant_explicit_edit_permission(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "sample.py").write_text("answer = 1\n")
+                hub = AIHub(EnvironmentManager(root))
+                requests = []
+                def handler(request):
+                    if request.url.path == "/api/version":
+                        return httpx.Response(200, json={"version": "test"})
+                    body = json.loads(request.content)
+                    requests.append(body)
+                    if len(requests) == 1:
+                        call = {"function": {"name": "apply_patch", "arguments": {"path": "sample.py", "old": "answer = 1", "new": "answer = 2"}}}
+                        return httpx.Response(200, text=json.dumps({"message": {"tool_calls": [call]}}) + "\n")
+                    return httpx.Response(200, text='{"message":{"content":"Updated on request."}}\n')
+                original = httpx.AsyncClient
+                with patch("unum_core.ai_hub.httpx.AsyncClient", side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler))):
+                    chunks = [chunk async for chunk in hub.stream_response("Update sample.py", "chat_consultant", allow_consultant_edits=True)]
+                self.assertEqual(chunks, ["Updated on request."])
+                self.assertIn("apply_patch", {item["function"]["name"] for item in requests[0]["tools"]})
+                self.assertEqual((root / "sample.py").read_text(), "answer = 2\n")
+        asyncio.run(scenario())
+
+    def test_cloud_key_chat_validation_skips_incompatible_model(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                hub = AIHub(EnvironmentManager(Path(temporary)))
+                hub.vault.save("openai", "test-key", "passphrase")
+                tested = []
+                def handler(request):
+                    if request.method == "GET":
+                        return httpx.Response(200, json={"data": [{"id": "gpt-4-bad"}, {"id": "gpt-4-good"}]})
+                    body = json.loads(request.content)
+                    tested.append(body)
+                    return httpx.Response(400 if body["model"] == "gpt-4-bad" else 200, json={"choices": []})
+                original = httpx.AsyncClient
+                with patch("unum_core.ai_hub.httpx.AsyncClient", side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler))):
+                    result = await hub.test_key("openai", "passphrase")
+                self.assertEqual(result["model"], "gpt-4-good")
+                self.assertEqual(tested[-1]["messages"], [{"role": "user", "content": "ping"}])
+                self.assertEqual(hub.routes()["code"], {"provider": "openai", "model": "gpt-4-good"})
+        asyncio.run(scenario())
+
+    def test_cloud_tool_stream_updates_workspace(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "sample.py").write_text("answer = 1\n")
+                hub = AIHub(EnvironmentManager(root))
+                hub.vault.save("openai", "test-key", "passphrase")
+                hub.auto_route("openai", "test-model")
+                requests = []
+                events = []
+                async def emit(event):
+                    events.append(event)
+                def handler(request):
+                    self.assertEqual(request.url.path, "/v1/chat/completions")
+                    body = json.loads(request.content)
+                    requests.append(body)
+                    if len(requests) == 1:
+                        call = {"index": 0, "id": "tool-1", "function": {"name": "apply_patch", "arguments": json.dumps({"path": "sample.py", "old": "answer = 1", "new": "answer = 2"})}}
+                        return httpx.Response(200, text='data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [call]}}]}) + '\n\ndata: [DONE]\n\n')
+                    return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"Updated."}}]}\n\ndata: [DONE]\n\n')
+                original = httpx.AsyncClient
+                with patch("unum_core.ai_hub.httpx.AsyncClient", side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler))):
+                    chunks = [chunk async for chunk in hub.stream_response("Update sample.py", "code", "passphrase", tool_emit=emit, allow_cloud_tools=True)]
+                self.assertEqual(chunks, ["Updated."])
+                self.assertEqual((root / "sample.py").read_text(), "answer = 2\n")
+                self.assertEqual(events, [{"event": "AI_FILE_CHANGED", "path": "sample.py"}])
+                self.assertEqual(requests[1]["messages"][-1]["tool_call_id"], "tool-1")
+        asyncio.run(scenario())
+
+    def test_local_model_without_native_tools_uses_structured_fallback(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "sample.py").write_text("answer = 1\n")
+                hub = AIHub(EnvironmentManager(root))
+                events = []
+                async def emit(event):
+                    events.append(event)
+                requests = []
+                def handler(request):
+                    if request.url.path == "/api/version":
+                        return httpx.Response(200, json={"version": "test"})
+                    body = json.loads(request.content)
+                    requests.append(body)
+                    if len(requests) == 1:
+                        return httpx.Response(400, json={"error": "model does not support tools"})
+                    if len(requests) == 2:
+                        return httpx.Response(200, json={"message": {"content": json.dumps({"tool": "apply_patch", "arguments": {"path": "sample.py", "old": "answer = 1", "new": "answer = 2"}})}})
+                    return httpx.Response(200, json={"message": {"content": "Updated."}})
+                original = httpx.AsyncClient
+                with patch("unum_core.ai_hub.httpx.AsyncClient", side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler))):
+                    chunks = [chunk async for chunk in hub.stream_response("Update sample.py", "code", tool_emit=emit)]
+                self.assertEqual(chunks, ["Updated."])
+                self.assertFalse(requests[1]["stream"])
+                self.assertEqual((root / "sample.py").read_text(), "answer = 2\n")
+                self.assertEqual(events[0]["event"], "AI_FILE_CHANGED")
+        asyncio.run(scenario())
+
+    def test_android_local_avd_and_apk_build(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env = EnvironmentManager(root)
+                def executable(relative: str, body: str):
+                    path = env.home / "runtimes" / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("#!/bin/sh\n" + body)
+                    path.chmod(0o755)
+                executable("java/bin/java", "exit 0\n")
+                executable("java/bin/javac", "exit 0\n")
+                executable("android/emulator/emulator", 'if [ "$1" = "-list-avds" ]; then printf "Pixel_8\\n"; else sleep 5; fi\n')
+                executable("android/platform-tools/adb", 'if [ "$1" = "devices" ]; then printf "List of devices attached\\nemulator-5554 device\\n"; fi\n')
+                executable("gradle/bin/gradle", 'printf "BUILD SUCCESSFUL\\n"\n')
+                project = root / "demo"
+                project.mkdir()
+                apk = project / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+                apk.parent.mkdir(parents=True)
+                apk.write_bytes(b"apk")
+                android = AndroidOrchestrator(env)
+                self.assertEqual(await android.avds(), ["Pixel_8"])
+                self.assertTrue(android.status()["runtimes"]["emulator"])
+                self.assertEqual((await android.devices())[0]["serial"], "emulator-5554")
+                self.assertTrue((await android.start_emulator("Pixel_8"))["started"])
+                events = []
+                async def emit(event):
+                    events.append(event)
+                self.assertEqual(await android.build("apk", ["debug"], emit, "demo"), 0)
+                self.assertIn("BUILD SUCCESSFUL", events[0]["data"])
+                self.assertEqual(android.apk_artifacts("demo"), ["demo/app/build/outputs/apk/debug/app-debug.apk"])
+                await android.close()
         asyncio.run(scenario())
 
 

@@ -4,11 +4,10 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from .env_manager import EnvironmentManager
+from .env_manager import EnvironmentManager, process_group_options, stop_process
 
 Emit = Callable[[dict], Awaitable[None]]
 
@@ -27,7 +26,7 @@ class SourceRunner:
             venv_path = self.env.home / "venvs" / "workspace"
             if not venv_path.exists():
                 await self.env.create_venv("workspace")
-            executable = venv_path / "bin" / "python"
+            executable = venv_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             environment = self.env.child_env(venv_path=venv_path)
             command = [str(executable), str(source)]
         elif suffix == ".js":
@@ -38,7 +37,7 @@ class SourceRunner:
             compiler = self.env.runtime("cpp", "bin/clang++")
             build_dir = self.env.home / "build"
             build_dir.mkdir(exist_ok=True)
-            output = build_dir / re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+            output = build_dir / (re.sub(r"[^A-Za-z0-9_-]", "_", raw) + (".exe" if os.name == "nt" else ""))
             code = await self._process([str(compiler), str(source), "-o", str(output)], source.parent, environment, emit)
             if code:
                 return code
@@ -49,7 +48,7 @@ class SourceRunner:
 
     async def _process(self, command: list[str], cwd: Path, environment: dict, emit: Emit) -> int:
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=environment,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **process_group_options())
         async def pump(reader: asyncio.StreamReader, channel: str):
             while chunk := await reader.readline():
                 await emit({"event": "run.output", "channel": channel, "data": chunk.decode("utf-8", "replace")})
@@ -58,5 +57,4 @@ class SourceRunner:
             return await process.wait()
         finally:
             if process.returncode is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                await process.wait()
+                await stop_process(process)

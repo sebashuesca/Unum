@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Bot, ChevronDown, ChevronRight, Code2, Database, FileCode2, Folder, GitBranch, HardDrive, LayoutPanelLeft, Maximize2, Minus, Play, Plus, RefreshCw, Save, Settings2, Smartphone, X } from 'lucide-react'
 import { AIHub } from './components/AIHub'
+import { BrandMark } from './components/BrandMark'
 import { CodeEditor, type OpenFile } from './components/CodeEditor'
 import { DatabaseWorkbench } from './components/DatabaseWorkbench'
 import { MobileToolchain } from './components/MobileToolchain'
+import { GoogleAccount } from './components/GoogleAccount'
+import { ThemePanel } from './components/ThemePanel'
 import { TerminalPanel } from './components/TerminalPanel'
 import { WorkspaceWizard } from './components/WorkspaceWizard'
 import { ipc, type EventPacket } from './services/ipc'
@@ -39,7 +42,12 @@ function App() {
   const [connected, setConnected] = useState(false)
   const [configuration, setConfiguration] = useState<WorkspaceConfiguration | null>(null)
   const [setupOpen, setSetupOpen] = useState(false)
-  const [section, setSection] = useState<Section>('explorer')
+  const [section, setSectionState] = useState<Section>('explorer')
+  const [activeView, setActiveView] = useState<'editor' | 'database' | 'sdk'>('editor')
+  const setSection = useCallback((next: Section) => {
+    setSectionState(next)
+    setActiveView(next === 'database' ? 'database' : next === 'mobile' ? 'sdk' : 'editor')
+  }, [])
   const [menu, setMenu] = useState('')
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [files, setFiles] = useState<OpenFile[]>([])
@@ -100,9 +108,17 @@ function App() {
         stderr.current = ''
       }
       if (event.event === 'agent.suggestion') { setOutput((previous) => [...previous, `\nSuggested fix: ${((event.suggestions as string[]) || []).join('; ')}\n`]); setDockTab('output') }
+      if (event.event === 'AI_FILE_CHANGED') {
+        const path = String(event.path)
+        void ipc.request<{ content: string }>('files.read', { path }).then((result) => {
+          setFiles((previous) => previous.map((file) => file.path === path && !file.dirty ? { ...file, content: result.content } : file))
+          setNotice(`AI updated ${path}`)
+          void refreshFiles()
+        }).catch((failure) => report((failure as Error).message))
+      }
     })
     return () => { offStatus(); offEvent() }
-  }, [refreshWorkspace])
+  }, [refreshWorkspace, refreshFiles, report])
 
   async function openFile(path: string) {
     const existing = files.find((item) => item.path === path)
@@ -169,9 +185,9 @@ function App() {
   const activeFile = files.find((item) => item.path === activePath)
   const selectedDatabases = configuration?.databases || []
   const selectedSdks = configuration?.sdks || []
-  return <div className="app-shell"><div className="titlebar"><div className="titlebrand"><img src="/logo.png" alt="Unum Logo" className="brand-mark" style={{ width: '18px', height: '18px', objectFit: 'contain' }} /><strong>unum</strong><span className="brand-ide">IDE</span></div><div className="title-center">{activeFile ? activeFile.path : 'Workspace'} <span>— Unum IDE</span></div><div className="window-actions"><button onClick={() => window.unum?.window('minimize')} aria-label="Minimize"><Minus size={15} /></button><button onClick={() => window.unum?.window('maximize')} aria-label="Maximize"><Maximize2 size={12} /></button><button className="close-window" onClick={() => window.unum?.window('close')} aria-label="Close"><X size={16} /></button></div></div>
-    <div className="tech-header"><div className="technical-menus">{Object.keys(menus).map((title) => <div className="tech-menu" key={title}><button className={menu === title ? 'active' : ''} onClick={() => setMenu(menu === title ? '' : title)}>{title}</button>{menu === title && <div className="menu-popover">{menus[title].map((item) => <button key={item.label} onClick={() => void menuAction(item.action)}>{item.label}</button>)}</div>}</div>)}</div><button className="header-run" onClick={() => void runActive()}><Play size={13} /> Ejecutar</button></div>
-    <div className="workspace"><nav className="activity-bar" aria-label="Main navigation"><div className="activity-top"><button title="Explorer" className={section === 'explorer' ? 'selected' : ''} onClick={() => setSection('explorer')}><Code2 size={20} /></button><button title="Database Explorer" className={section === 'database' ? 'selected' : ''} onClick={() => setSection('database')}><Database size={20} /></button><button title="Mobile & Java" className={section === 'mobile' ? 'selected' : ''} onClick={() => setSection('mobile')}><Smartphone size={20} /></button><button title="AI Hub" className={section === 'ai' ? 'selected' : ''} onClick={() => setSection('ai')}><Bot size={21} /></button></div><div className="activity-bottom"><button title="Workspace setup" onClick={() => setSetupOpen(true)}><Settings2 size={19} /></button></div></nav>
+  return <div className="app-shell"><div className="titlebar"><div className="titlebrand" aria-label="Unum IDE"><BrandMark decorative /><strong className="brand-word">unum<span className="brand-dot" aria-hidden="true">.</span><small className="brand-ide">IDE</small></strong></div><div className="title-center">{activeFile ? activeFile.path : 'Workspace'} <span>— Unum IDE</span></div><div className="window-actions"><button onClick={() => window.unum?.window('minimize')} aria-label="Minimize"><Minus size={15} /></button><button onClick={() => window.unum?.window('maximize')} aria-label="Maximize"><Maximize2 size={12} /></button><button className="close-window" onClick={() => window.unum?.window('close')} aria-label="Close"><X size={16} /></button></div></div>
+    <div className="tech-header"><div className="technical-menus">{Object.keys(menus).map((title) => <div className="tech-menu" key={title}><button className={menu === title ? 'active' : ''} onClick={() => setMenu(menu === title ? '' : title)}>{title}</button>{menu === title && <div className="menu-popover">{menus[title].map((item) => <button key={item.label} onClick={() => void menuAction(item.action)}>{item.label}</button>)}</div>}</div>)}</div><div className="header-controls"><ThemePanel /><GoogleAccount /><button className="header-run" onClick={() => void runActive()}><Play size={13} /> Ejecutar</button></div></div>
+    <div className={`workspace workspace-${activeView}`}><nav className="activity-bar" aria-label="Main navigation"><div className="activity-top"><button title="Explorer" className={section === 'explorer' ? 'selected' : ''} onClick={() => setSection('explorer')}><Code2 size={20} /></button><button title="Database Explorer" className={section === 'database' ? 'selected' : ''} onClick={() => setSection('database')}><Database size={20} /></button><button title="Mobile & Java" className={section === 'mobile' ? 'selected' : ''} onClick={() => setSection('mobile')}><Smartphone size={20} /></button><button title="AI Hub" className={section === 'ai' ? 'selected' : ''} onClick={() => setSection('ai')}><Bot size={21} /></button></div><div className="activity-bottom"><button title="Workspace setup" onClick={() => setSetupOpen(true)}><Settings2 size={19} /></button></div></nav>
       <aside className="sidebar"><header><span>WORKSPACE</span><div className="sidebar-actions"><button onClick={() => { setSection('explorer'); setNewFile(true) }} title="New file"><Plus size={14} /></button><button onClick={() => void refreshFiles()} title="Refresh"><RefreshCw size={14} /></button></div></header>
         <div className="sidebar-section"><ChevronDown size={13} /><strong>EXPLORER</strong></div>
         {newFile && <input className="new-file-input" autoFocus placeholder="new-file.ts" value={newFilePath} onChange={(event) => setNewFilePath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void createFile(); if (event.key === 'Escape') setNewFile(false) }} />}
@@ -182,8 +198,8 @@ function App() {
         <div className="sidebar-runtime-list">{selectedSdks.length ? selectedSdks.map((name) => <button key={name} onClick={() => setSection('mobile')}><span className={runtimes[name === 'java21' ? 'java' : 'android'] ? 'runtime-ready' : 'runtime-missing'} />{name === 'java21' ? 'JAVA 21' : 'ANDROID 34'}<small>{runtimes[name === 'java21' ? 'java' : 'android'] ? 'Ready' : 'Not provisioned'}</small></button>) : <small>No SDK selected</small>}</div>
         <button className="sidebar-ai" onClick={() => setSection('ai')}><Bot size={17} /> OPEN AI HUB <ChevronRight size={14} /></button><div className="sidebar-footer"><HardDrive size={13} /> Local workspace</div>
       </aside>
-      <main className={`main-content ${dockSide === 'right' ? 'main-dock-right' : ''}`}><div className="main-upper"><div className="tabs"><div className="tab-strip">{files.map((file) => <button key={file.path} className={`file-tab ${activePath === file.path && section === 'explorer' ? 'active' : ''}`} onClick={() => { setActivePath(file.path); setSection('explorer') }}><FileCode2 size={15} /><span>{file.path.split('/').pop()}</span>{file.dirty && <i className="dirty-dot" />}<X size={13} className="tab-close" onClick={(event) => { event.stopPropagation(); setFiles((previous) => previous.filter((item) => item.path !== file.path)); if (activePath === file.path) setActivePath('') }} /></button>)}</div><button className="save-button" onClick={() => void saveFile()} title="Save file"><Save size={15} /></button></div><div className="breadcrumbs">UNUM WORKSPACE <ChevronRight size={12} /> {section === 'explorer' ? activePath || 'Overview' : section.toUpperCase()}</div><div className="content-area">
-        {section === 'explorer' && (activeFile ? <CodeEditor key={activeFile.path} file={activeFile} schema={objects.tables} onChange={(content) => setFiles((previous) => previous.map((file) => file.path === activeFile.path ? { ...file, content, dirty: true } : file))} /> : <div className="welcome"><img src="/logo.png" alt="Unum Logo" className="welcome-logo" style={{ width: '80px', height: '80px', objectFit: 'contain' }} /><h1>Build in one place.</h1><p>Code, data, Android, and AI in one local workspace.</p><div className="quick-actions"><button onClick={() => setSection('database')}><Database size={18} /><span><strong>Explore data</strong><small>SQL, visual schemas and ER diagrams</small></span><ChevronRight size={16} /></button><button onClick={() => setSection('mobile')}><Smartphone size={18} /><span><strong>Create a project</strong><small>Java, Kotlin and Android templates</small></span><ChevronRight size={16} /></button><button onClick={() => setSection('ai')}><Bot size={18} /><span><strong>Open AI Hub</strong><small>Local models, cloud providers, specialists</small></span><ChevronRight size={16} /></button></div><span className="welcome-hint">Open a file from the explorer to start editing.</span></div>)}
+      <main className={`main-content ${dockSide === 'right' ? 'main-dock-right' : ''} view-${activeView}`}><div className="main-upper">{activeView === 'editor' && <div className="tabs"><div className="tab-strip">{files.map((file) => <button key={file.path} className={`file-tab ${activePath === file.path && section === 'explorer' ? 'active' : ''}`} onClick={() => { setActivePath(file.path); setSection('explorer') }}><FileCode2 size={15} /><span>{file.path.split('/').pop()}</span>{file.dirty && <i className="dirty-dot" />}<X size={13} className="tab-close" onClick={(event) => { event.stopPropagation(); setFiles((previous) => previous.filter((item) => item.path !== file.path)); if (activePath === file.path) setActivePath('') }} /></button>)}</div><button className="save-button" onClick={() => void saveFile()} title="Save file"><Save size={15} /></button></div>}<div className="breadcrumbs">UNUM WORKSPACE <ChevronRight size={12} /> {section === 'explorer' ? activePath || 'Overview' : section.toUpperCase()}</div><div className="content-area">
+        {section === 'explorer' && (activeFile ? <CodeEditor key={activeFile.path} file={activeFile} schema={objects.tables} onChange={(content) => setFiles((previous) => previous.map((file) => file.path === activeFile.path ? { ...file, content, dirty: true } : file))} /> : <div className="welcome"><BrandMark className="brand-mark--hero" /><h1>Build in one place.</h1><p>Code, data, Android, and AI in one local workspace.</p><div className="quick-actions"><button onClick={() => setSection('database')}><Database size={18} /><span><strong>Explore data</strong><small>SQL, visual schemas and ER diagrams</small></span><ChevronRight size={16} /></button><button onClick={() => setSection('mobile')}><Smartphone size={18} /><span><strong>Create a project</strong><small>Java, Kotlin and Android templates</small></span><ChevronRight size={16} /></button><button onClick={() => setSection('ai')}><Bot size={18} /><span><strong>Open AI Hub</strong><small>Local models, cloud providers, specialists</small></span><ChevronRight size={16} /></button></div><span className="welcome-hint">Open a file from the explorer to start editing.</span></div>)}
         {section === 'database' && <DatabaseWorkbench key={sqlFromFile} initialSql={sqlFromFile} initialConnectionId={activeConnectionId} onSchemaChange={setObjects} onError={report} onConnectionChange={changeDatabase} onConsole={(line) => setDbConsole((previous) => [...previous.slice(-100), line])} />}
         {section === 'mobile' && <MobileToolchain onProjectCreated={() => void refreshFiles()} onError={report} />}
         {section === 'ai' && <AIHub key={hubKey} initialError={lastError} onError={report} />}

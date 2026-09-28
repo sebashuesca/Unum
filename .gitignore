@@ -4,6 +4,8 @@ dist/
 build/
 app-frontend/dist/
 app-frontend/release/
+app-frontend/resources/bin/
+core-backend/build/
 
 # Python / Backend
 .venv/
@@ -13,6 +15,7 @@ __pycache__/
 core-backend/.venv/
 
 # Runtimes local y BD
+.unum/
 *.sqlite3
 *.db
 runtimes/
@@ -20,3 +23,9 @@ runtimes/
 # Sistema y VS Code
 .DS_Store
 .vscode/
+
+# Salidas de compilación y pruebas temporales
+squashfs-root/
+app-frontend/release/
+app-frontend/dist/
+dist/

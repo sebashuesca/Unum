@@ -21,5 +21,5 @@ export type DatabaseConnection = { id: string; kind: string; label: string; data
 
 export type AiCatalogItem = { id: string; name: string; model: string; size_gb: number; role: string; source: string }
 export type AiRoute = { provider: string; model: string }
-export type AiRoutes = Record<'code' | 'sql' | 'debug', AiRoute>
+export type AiRoutes = Record<'code' | 'sql' | 'debug' | 'chat_consultant', AiRoute>
 export type AiStatus = { installed: boolean; running: boolean; catalog: AiCatalogItem[]; routes: AiRoutes; providers: string[]; installed_models: string[] }
