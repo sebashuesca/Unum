@@ -2,14 +2,19 @@ import asyncio
 import io
 import json
 import os
+import ssl
 import tarfile
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import zstandard
 import httpx
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from openpyxl import Workbook
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -18,7 +23,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from unum_core.database import Database
-from unum_core.connections import Connection, ConnectionManager
+from unum_core.connections import Connection, ConnectionManager, mysql_tls_context
 from unum_core.relational import RelationalWorkbench, json_cell, quote
 from unum_core.documents import DocumentStore
 from unum_core.env_manager import EnvironmentManager
@@ -36,6 +41,60 @@ import unum_core.main as main_module
 
 
 class CoreIntegrationTests(unittest.TestCase):
+    def test_mysql_remote_tls_and_optional_aiven_ca(self):
+        class StubEngine:
+            def connect(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def execute(self, *_):
+                return None
+
+            async def dispose(self):
+                return None
+
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temporary:
+                database = Database(Path(temporary))
+                manager = ConnectionManager(database)
+                with patch("unum_core.connections.create_async_engine", return_value=StubEngine()) as create:
+                    await manager.connect({"kind": "mysql", "host": "mysql.example.com", "database": "defaultdb"})
+                    self.assertEqual(create.call_args.args[0].drivername, "mysql+aiomysql")
+                    context = create.call_args.kwargs["connect_args"]["ssl"]
+                    self.assertIsInstance(context, ssl.SSLContext)
+                    self.assertEqual(context.verify_mode, ssl.CERT_NONE)
+                    self.assertFalse(context.check_hostname)
+                    self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
+                    await manager.connect({"kind": "mysql", "host": "127.0.0.1", "database": "localdb"})
+                    self.assertNotIn("ssl", create.call_args.kwargs["connect_args"])
+                    with self.assertRaisesRegex(ValueError, "Invalid MySQL CA certificate"):
+                        await manager.connect({"kind": "mysql", "host": "mysql.example.com", "database": "defaultdb", "ssl_ca_pem": "bad certificate"})
+                await manager.close()
+                await database.close()
+                engine = create_async_engine("mysql+aiomysql://user:password@mysql.example.com/defaultdb",
+                                             connect_args={"ssl": mysql_tls_context("")})
+                self.assertEqual(engine.dialect.driver, "aiomysql")
+                await engine.dispose()
+
+        asyncio.run(scenario())
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "Unum test CA")])
+        now = datetime.now(timezone.utc)
+        certificate = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+                       .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                       .not_valid_before(now - timedelta(days=1)).not_valid_after(now + timedelta(days=1))
+                       .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                       .sign(key, hashes.SHA256()))
+        pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
+        context = mysql_tls_context(pem)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
     def test_packaged_file_origin_requires_matching_ipc_token(self):
         with patch.dict(os.environ, {"UNUM_IPC_TOKEN": "packaged-session-token"}):
             with TestClient(app) as client:

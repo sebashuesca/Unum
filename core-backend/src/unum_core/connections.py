@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from itertools import islice
 import re
 import uuid
@@ -17,6 +18,25 @@ from .relational import RelationalWorkbench, json_cell, safe_name
 
 KINDS = {"postgresql", "mysql", "mongodb", "redis", "cassandra"}
 DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mongodb": 27017, "redis": 6379, "cassandra": 9042}
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def mysql_tls_context(ca_pem: str) -> ssl.SSLContext:
+    """Require encryption; verify the server when an Aiven/project CA is supplied."""
+    if ca_pem:
+        if len(ca_pem) > 200_000 or "-----BEGIN CERTIFICATE-----" not in ca_pem:
+            raise ValueError("Invalid MySQL CA certificate")
+        try:
+            context = ssl.create_default_context(cadata=ca_pem)
+        except (ssl.SSLError, ValueError) as exc:
+            raise ValueError("Invalid MySQL CA certificate") from exc
+    else:
+        # Equivalent to SSL_MODE_REQUIRED: encrypted transport without CA validation.
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
 
 
 @dataclass
@@ -60,15 +80,26 @@ class ConnectionManager:
         password = str(payload.get("password") or "")
         client: object
         if kind in {"postgresql", "mysql"}:
-            driver = "postgresql+asyncpg" if kind == "postgresql" else "mysql+asyncmy"
+            driver = "postgresql+asyncpg" if kind == "postgresql" else "mysql+aiomysql"
             url = URL.create(driver, username=username or None, password=password or None, host=host, port=port, database=database)
-            engine = create_async_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=0, connect_args={"timeout": 8} if kind == "postgresql" else {"connect_timeout": 8})
+            connect_args: dict = {"timeout": 8} if kind == "postgresql" else {"connect_timeout": 8}
+            if kind == "mysql":
+                ca_pem = payload.get("ssl_ca_pem") or ""
+                if not isinstance(ca_pem, str):
+                    raise ValueError("Invalid MySQL CA certificate")
+                if host.lower() not in LOCAL_HOSTS or ca_pem:
+                    connect_args["ssl"] = mysql_tls_context(ca_pem)
+            engine = create_async_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=0, connect_args=connect_args)
             try:
                 async with engine.connect() as connection:
                     await connection.execute(text("SELECT 1"))
-            except Exception:
+            except Exception as exc:
                 await engine.dispose()
-                raise ValueError(f"Unable to connect to {kind} at {host}:{port}") from None
+                reason = str(getattr(exc, "orig", exc))
+                if password:
+                    reason = reason.replace(password, "[redacted]")
+                reason = re.sub(r"\s+", " ", reason)[:240]
+                raise ValueError(f"Unable to connect to {kind} at {host}:{port}: {reason}") from None
             client = engine
         elif kind == "mongodb":
             from pymongo import AsyncMongoClient

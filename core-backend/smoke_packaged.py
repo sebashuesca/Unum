@@ -36,8 +36,18 @@ async def verify(token: str, port: int) -> None:
         while asyncio.get_running_loop().time() < deadline:
             message = json.loads(await asyncio.wait_for(socket.recv(), 10))
             if message.get("event") == "terminal.output" and "UNUM_PACKAGED_TERMINAL" in message.get("data", ""):
+                break
+        else:
+            raise AssertionError("Packaged terminal did not echo the command")
+        await socket.send(json.dumps({"action": "DATABASE_CONNECT", "msg_id": "mysql-driver", "payload": {
+            "kind": "mysql", "host": "127.0.0.2", "port": 1, "database": "driver_check",
+        }}))
+        while True:
+            message = json.loads(await asyncio.wait_for(socket.recv(), 10))
+            if message.get("msg_id") == "mysql-driver":
+                assert message.get("ok") is False, message
+                assert "Unable to connect to mysql" in message.get("error", ""), message
                 return
-        raise AssertionError("Packaged terminal did not echo the command")
 
 
 def main() -> None:
@@ -71,7 +81,7 @@ def main() -> None:
             else:
                 raise TimeoutError("Packaged backend did not pass /health in 30 seconds")
             asyncio.run(verify(token, port))
-            print("Packaged backend health and terminal: OK")
+            print("Packaged backend health, terminal, and MySQL driver: OK")
         finally:
             process.terminate()
             try:

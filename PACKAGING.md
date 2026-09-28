@@ -17,7 +17,7 @@ npm run package:linux   # host Linux: AppImage y .deb
 # npm run package:win   # host Windows x64: NSIS .exe y portable .exe
 ```
 
-`package.mjs` instala `core-backend[package]` en el `venv` local si hace falta, ejecuta `core-backend/build_backend.py`, compila el frontend y llama a electron-builder. Puede indicarse un intérprete de build con `UNUM_BUILD_PYTHON` cuando aún no existe `core-backend/.venv`. `build_backend.py` también puede ejecutarse directamente con el Python del `venv`.
+`package.mjs` sincroniza `core-backend[package]` en el `venv` local antes de cada build, ejecuta `core-backend/build_backend.py`, compila el frontend y llama a electron-builder. Puede indicarse un intérprete de build con `UNUM_BUILD_PYTHON` cuando aún no existe `core-backend/.venv`. `build_backend.py` también puede ejecutarse directamente con el Python del `venv`.
 
 En Fedora sin `libcrypt.so.1`, el script descarga `libxcrypt-compat` con `dnf download`, lo extrae en `app-frontend/build/compat/` y lo expone solo al proceso de empaquetado mediante `LD_LIBRARY_PATH`; no ejecuta `dnf install` ni usa `sudo`. Si el equipo de build ya tiene esa biblioteca en otra ruta, puede indicarse su directorio con `UNUM_BUILD_LIB_DIR`.
 
@@ -38,4 +38,4 @@ En Linux, después de construir el backend:
 core-backend/.venv/bin/python core-backend/smoke_packaged.py app-frontend/resources/bin/linux/unum-backend
 ```
 
-El script inicia el binario con un workspace temporal y puerto loopback libre, comprueba `/health`, rechaza un token incorrecto, abre el WebSocket con `Origin: file://` y token válido y ejecuta un comando en la terminal. Para inspeccionar el paquete sin generar instaladores: `cd app-frontend && npm exec -- electron-builder --linux dir`.
+El script inicia el binario con un workspace temporal y puerto loopback libre, comprueba `/health`, rechaza un token incorrecto, abre el WebSocket con `Origin: file://` y token válido, ejecuta un comando en la terminal y confirma que el controlador MySQL se carga desde el binario. Para inspeccionar el paquete sin generar instaladores: `cd app-frontend && npm exec -- electron-builder --linux dir`.

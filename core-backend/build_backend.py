@@ -41,12 +41,12 @@ def build() -> Path:
         f"--specpath={work}",
     ]
     for package in ("unum_core", "uvicorn", "sqlalchemy", "aiosqlite", "asyncpg",
-                    "asyncmy", "redis", "cassandra", "pymongo"):
+                    "aiomysql", "pymysql", "cryptography", "redis", "cassandra", "pymongo"):
         options.extend(("--collect-submodules", package))
     for package in ("jsonschema", "jsonschema_specifications", "pandas", "openpyxl", "certifi"):
         options.extend(("--collect-data", package))
     for module in ("sqlalchemy.dialects.sqlite.aiosqlite", "sqlalchemy.dialects.postgresql.asyncpg",
-                   "sqlalchemy.dialects.mysql.asyncmy", "uvicorn.loops.auto",
+                   "sqlalchemy.dialects.mysql.aiomysql", "uvicorn.loops.auto",
                    "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto"):
         options.extend(("--hidden-import", module))
     pyinstaller_run(options)

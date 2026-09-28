@@ -51,8 +51,7 @@ if (!existsSync(python)) {
   const args = host === 'win' && !process.env.UNUM_BUILD_PYTHON ? ['-3', '-m', 'venv', join(backend, '.venv')] : ['-m', 'venv', join(backend, '.venv')]
   run(bootstrap, args)
 }
-const probe = spawnSync(python, ['-c', 'import unum_core, PyInstaller'], { cwd: root, stdio: 'ignore' })
-if (probe.status !== 0) run(python, ['-m', 'pip', 'install', '-e', `${backend}[package]`])
+run(python, ['-m', 'pip', 'install', '-e', `${backend}[package]`])
 run(python, [join(backend, 'build_backend.py')])
 
 const binary = join(frontend, 'resources', 'bin', host, host === 'win' ? 'unum-backend.exe' : 'unum-backend')
